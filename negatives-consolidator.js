@@ -14,6 +14,11 @@
  *     already covered by a phrase or broad negative in the same list)
  *   - Step 2: replaces groups of exact negatives by one phrase negative
  *     (greedy set cover over 2-5 word n-grams)
+ *   - Single terms: an off-topic word found in several negatives ("karate")
+ *     becomes ONE one-word phrase negative; word families (boxen, kickboxen,
+ *     kinderboxen, boxclub, boxing) are recognized and excluded together
+ *   - Reports negatives that contradict the rule (match the positive pattern
+ *     or block an own keyword) - they cost relevant traffic
  *   - Safety nets: a new phrase is never added if it matches your positive
  *     pattern, appears in one of your own keywords or in a relevant /
  *     converting search term of the campaigns using the list
@@ -22,7 +27,7 @@
  *   - Can share the "rules" tab with the Search Query Excluder
  *
  * @name        Search Query Negatives Consolidator
- * @version     1.0.0
+ * @version     1.1.0
  * @author      Richard Stinauer (adtraffic) <rs@adtraffic.de>
  * @copyright   (c) 2026 adtraffic - https://www.adtraffic.de
  * @license     MIT - see LICENSE file or https://opensource.org/licenses/MIT
@@ -35,6 +40,8 @@
  *   4. Set DRY_RUN = false and schedule the script (e.g. weekly).
  *
  * Changelog
+ *   1.1.0  2026-11-17  Single terms ("karate"), word families (boxen, kickboxen,
+ *                       boxclub), detection of negatives contradicting the rule.
  *   1.0.0  2026-11-17  First public single-account release.
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. Always
@@ -107,6 +114,44 @@ const MAX_WORDS = 5;
 // phrase / broad negative of the same list (no traffic impact)
 const REMOVE_REDUNDANT_NEGATIVES = true;
 
+// --- Single terms and word families ---------------------------------------
+
+// Replace all exact negatives containing an obviously off-topic word by ONE
+// one-word phrase negative: [karate landshut], [karate für kinder], [karate]
+// -> "karate". A term must occur in at least SINGLE_TERM_MIN_COVERAGE
+// negatives. If all its negatives share more words, the phrase is extended
+// ([kung fu landshut], [kung fu kurse] -> "kung fu").
+const SINGLE_TERMS = true;
+const SINGLE_TERM_MIN_COVERAGE = 3;
+
+// Word families: words sharing a stem (boxen, kickboxen, kinderboxen,
+// boxclub, boxing) count together. If the family reaches
+// SINGLE_TERM_MIN_COVERAGE, EVERY member becomes a phrase negative - even if
+// it occurs only once. (Google Ads has no substring negatives, so each word
+// form needs its own negative.)
+const WORD_FAMILIES = true;
+const MIN_ROOT_LENGTH = 3;
+
+// Words that never become one-word negatives because they also appear in
+// relevant searches (locations, audiences, prices, ...). Add account-specific
+// words (cities, brand names, services) to PROTECTED_WORDS or to the rule.
+const GENERIC_WORDS = 'nähe naehe near nearby umgebung meiner deiner ' +
+  'kinder kind kids kid jugendliche teenager erwachsene frauen männer damen herren senioren anfänger ' +
+  'baby babys schüler familie familien ' +
+  'preis preise kosten kostenlos gratis free günstig billig angebot angebote rabatt gutschein ' +
+  'kurs kurse kursplan training trainer lernen schule verein club studio center zentrum ' +
+  'probetraining probestunde anmeldung termin termine zeiten öffnungszeiten adresse telefon kontakt ' +
+  'übung übungen workout workouts kurse lehrer unterricht stunde stunden ' +
+  'online kaufen bestellen shop test erfahrungen bewertung bewertungen vergleich ' +
+  'jobs job ausbildung beste bester besten gut gute guter neu neue jahre jahren alter ab bis ' +
+  'deutschland germany stadt city kids for near me best cheap price prices cost course courses class classes school';
+const PROTECTED_WORDS = '';
+
+// Negatives that contradict the rule (they match the positive pattern or
+// block an own keyword / relevant search term) are always reported.
+// true = also remove them from the list.
+const REMOVE_CONFLICTING_NEGATIVES = false;
+
 // Filler words. A phrase consisting only of them is never used, and with
 // SKIP_STOPWORD_EDGES a phrase must neither start nor end with one.
 const STOPWORDS = 'a an and at for in of on or the to with without me my is are ' +
@@ -143,7 +188,7 @@ const MAX_REMOVALS_PER_LIST = 2000;
 // ===========================================================================
 
 const SCRIPT_NAME = 'Search Query Negatives Consolidator';
-const SCRIPT_VERSION = '1.0.0';
+const SCRIPT_VERSION = '1.1.0';
 const SCRIPT_URL = 'https://www.adtraffic.de';
 
 const RULES_SHEET = 'rules';
@@ -166,13 +211,15 @@ const RULE_DEFAULTS = {
   positivePattern: '',
   campaignFilter: '',
   minCoverage: '',
+  singleMinCoverage: '',
+  protectedWords: '',
   mode: 'live',
   consolidatorMode: '',
   consolidate: true,
   active: true
 };
 
-const RULE_HEADER = ['active', 'campaignFilter', 'listName', 'positivePattern', 'dateRange', 'minImpressions', 'mode', 'consolidate', 'consolidatorMode', 'minCoverage', 'notes'];
+const RULE_HEADER = ['active', 'campaignFilter', 'listName', 'positivePattern', 'dateRange', 'minImpressions', 'mode', 'consolidate', 'consolidatorMode', 'minCoverage', 'singleMinCoverage', 'protectedWords', 'notes'];
 const LOG_HEADER = ['timestamp', 'list', 'action', 'negative', 'matchType', 'replaces', 'reason'];
 
 // Header aliases, compatible with the Search Query Excluder sheet
@@ -184,7 +231,9 @@ const HEADER_ALIASES = {
   mode: ['mode', 'modeliveortest', 'modus'],
   consolidate: ['consolidate', 'consolidation', 'konsolidieren'],
   consolidatorMode: ['consolidatormode', 'consolidationmode', 'konsolidierungsmodus'],
-  minCoverage: ['mincoverage', 'mindestabdeckung']
+  minCoverage: ['mincoverage', 'mindestabdeckung'],
+  singleMinCoverage: ['singlemincoverage', 'singletermmincoverage', 'mindestabdeckungeinzelbegriff'],
+  protectedWords: ['protectedwords', 'geschuetztewoerter', 'geschütztewörter', 'geschtztewrter']
 };
 
 const ACTION = {
@@ -193,6 +242,7 @@ const ACTION = {
   removed: 'REMOVED',
   wouldRemove: 'WOULD_REMOVE',
   rejected: 'REJECTED',
+  conflict: 'CONFLICT',
   postponed: 'POSTPONED',
   failed: 'FAILED'
 };
@@ -284,6 +334,12 @@ function processList(group, context, listCache) {
     minWords: MIN_WORDS,
     maxWords: MAX_WORDS,
     removeRedundant: REMOVE_REDUNDANT_NEGATIVES,
+    removeConflicting: REMOVE_CONFLICTING_NEGATIVES,
+    singleTerms: SINGLE_TERMS,
+    singleMinCoverage: group.singleMinCoverage,
+    wordFamilies: WORD_FAMILIES,
+    minRootLength: MIN_ROOT_LENGTH,
+    protectedWords: toWordSet([GENERIC_WORDS, PROTECTED_WORDS].concat(group.protectedWords)),
     maxNewPhrases: MAX_NEW_PHRASES_PER_LIST,
     maxRemovals: MAX_REMOVALS_PER_LIST
   }, { patterns: patterns, protectedTerms: protectedTerms });
@@ -292,10 +348,15 @@ function processList(group, context, listCache) {
     before: plan.before,
     after: plan.after,
     redundant: plan.redundant,
+    conflicting: plan.conflicting,
     phrases: plan.phrases,
     rejected: plan.rejected,
     postponed: plan.postponed
   });
+
+  if (plan.conflicting.length > 0 && !REMOVE_CONFLICTING_NEGATIVES) {
+    result.warnings.push(`${plan.conflicting.length} negative(s) contradict the rule and may block relevant traffic - please check (or set REMOVE_CONFLICTING_NEGATIVES = true).`);
+  }
 
   if (plan.postponed.length > 0) {
     result.warnings.push(`${plan.postponed.length} change(s) postponed to the next run (limit per run reached).`);
@@ -320,6 +381,7 @@ function emptyResult(group, error) {
     before: 0,
     after: 0,
     redundant: [],
+    conflicting: [],
     phrases: [],
     rejected: [],
     postponed: [],
@@ -334,17 +396,36 @@ function emptyResult(group, error) {
 // Pure function: decides which negatives are removed and which phrase
 // negatives are added (testable without Google Ads).
 //   negatives  [{ text, type: 'EXACT'|'PHRASE'|'BROAD', kw }]
-//   options    { minCoverage, minWords, maxWords, removeRedundant, maxNewPhrases, maxRemovals }
+//   options    { minCoverage, minWords, maxWords, removeRedundant, removeConflicting,
+//                singleTerms, singleMinCoverage, wordFamilies, minRootLength,
+//                protectedWords: { word: true }, maxNewPhrases, maxRemovals }
 //   guard      { patterns: [RegExp], protectedTerms: [{ text, reason }] }
 function planConsolidation(negatives, options, guard) {
-  const plan = { before: negatives.length, after: negatives.length, redundant: [], phrases: [], rejected: [], postponed: [] };
+  const plan = { before: negatives.length, after: negatives.length, redundant: [], conflicting: [], phrases: [], rejected: [], postponed: [] };
   const redundant = [];
+  const protectedIndex = buildWordIndex(guard.protectedTerms);
+  const patternWords = extractPatternWords(guard.patterns);
+  const protectedWords = options.protectedWords || {};
+
+  // Step 0: negatives contradicting the rule (match the positive pattern or
+  // block an own keyword / relevant search term). Never consolidated.
+  const valid = [];
+
+  negatives.forEach(n => {
+    const conflict = findConflict(n, guard, protectedIndex);
+
+    if (conflict) {
+      plan.conflicting.push(Object.assign({}, n, { reason: conflict }));
+    } else {
+      valid.push(n);
+    }
+  });
 
   // Step 1a: duplicates (broad negatives are compared as word sets)
   const seen = {};
   const unique = [];
 
-  negatives.forEach(n => {
+  valid.forEach(n => {
     const key = n.type === 'BROAD' ? `B|${wordSetKey(n.text)}` : `${n.type}|${n.text}`;
 
     if (seen[key]) {
@@ -389,60 +470,151 @@ function planConsolidation(negatives, options, guard) {
     redundant.length = 0;
   }
 
-  // Step 2: n-gram candidates of the remaining exact negatives
+  // Step 2: candidates from the remaining exact negatives
   const words = exacts.map(n => n.text.split(' '));
-  const coverage = {};
+  const maxWords = Math.min(options.maxWords, LIMITS.maxKeywordWords);
+  const coverage = {};      // multi-word n-grams
+  const wordCoverage = {};  // single words
 
   words.forEach((w, idx) => {
     const local = {};
-    for (let n = options.minWords; n <= Math.min(options.maxWords, LIMITS.maxKeywordWords); n++) {
+    for (let n = 1; n <= maxWords; n++) {
       for (let i = 0; i + n <= w.length; i++) {
         const gram = w.slice(i, i + n).join(' ');
         if (!local[gram]) {
           local[gram] = true;
-          (coverage[gram] || (coverage[gram] = [])).push(idx);
+          const target = n === 1 ? wordCoverage : coverage;
+          (target[gram] || (target[gram] = [])).push(idx);
         }
       }
     }
   });
 
-  const protectedIndex = buildWordIndex(guard.protectedTerms);
-  const candidates = [];
+  const candidates = {};
+  const rejected = {};
+  const reject = (phrase, count, reason) => {
+    if (!rejected[phrase] || rejected[phrase].coverage < count) {
+      rejected[phrase] = { phrase: phrase, coverage: count, reason: reason };
+    }
+  };
+  const addCandidate = (phrase, idx, min, basis, requires) => {
+    const existing = candidates[phrase];
+    if (!existing) {
+      candidates[phrase] = { phrase: phrase, idx: idx, words: phrase.split(' ').length, min: min, basis: basis, requires: requires || null };
+    } else if (min < existing.min && existing.requires) {
+      existing.requires = existing.requires.concat(requires || []);
+    }
+  };
 
+  // 2a: multi-word phrases (n-grams) shared by many exact negatives
   Object.keys(coverage).forEach(gram => {
-    if (coverage[gram].length < options.minCoverage) {
+    const count = coverage[gram].length;
+    if (gram.split(' ').length < Math.max(options.minWords, 2) || count < options.minCoverage) {
       return;
     }
-
     const check = checkCandidate(gram, guard, protectedIndex);
-
     if (check.reason) {
       if (!check.silent) {
-        plan.rejected.push({ phrase: gram, coverage: coverage[gram].length, reason: check.reason });
+        reject(gram, count, check.reason);
       }
       return;
     }
-
-    candidates.push({ phrase: gram, idx: coverage[gram], words: gram.split(' ').length });
+    addCandidate(gram, coverage[gram], options.minCoverage, 'phrase');
   });
 
-  plan.rejected.sort((a, b) => b.coverage - a.coverage);
+  // 2b: single terms ("karate") and word families ("boxen", "kickboxen", "boxclub")
+  if (options.singleTerms) {
+    const termCheck = {};
+    const checkTerm = word => {
+      if (termCheck[word] === undefined) {
+        termCheck[word] = checkSingleTerm(word, guard, protectedIndex, protectedWords, patternWords);
+      }
+      return termCheck[word];
+    };
 
-  // Greedy set cover: most replaced negatives first, on a tie the more specific phrase
+    // A single term is extended to the longest phrase all its negatives share
+    // ("kung" -> "kung fu"), so it never gets broader than necessary.
+    const termPhrase = {};
+    const useTerm = (word, min, basis, requires) => {
+      const idx = wordCoverage[word];
+      const phrase = idx.length >= 2 ? extendPhrase(word, idx, words, maxWords) : word;
+      if (phrase !== word && checkCandidate(phrase, guard, protectedIndex).reason) {
+        return;
+      }
+      termPhrase[word] = phrase;
+      addCandidate(phrase, idx, Math.min(min, idx.length), basis, requires);
+    };
+
+    Object.keys(wordCoverage).forEach(word => {
+      const count = wordCoverage[word].length;
+      if (count < options.singleMinCoverage) {
+        return;
+      }
+      const check = checkTerm(word);
+      if (check.reason) {
+        if (!check.silent) {
+          reject(word, count, check.reason);
+        }
+        return;
+      }
+      useTerm(word, options.singleMinCoverage, 'term');
+    });
+
+    if (options.wordFamilies) {
+      // A family needs an anchor: a word of the family that qualifies as a
+      // single term on its own (e.g. "boxen" in 4 negatives). Members are
+      // words starting with the anchor's stem (boxing, boxclub) or
+      // containing the anchor itself (kickboxen, kinderboxen).
+      const anchors = {};
+      Object.keys(wordCoverage).forEach(word => {
+        const root = stemWord(word);
+        if (root.length >= options.minRootLength && wordCoverage[word].length >= options.singleMinCoverage && !checkTerm(word).reason) {
+          (anchors[root] || (anchors[root] = [])).push(word);
+        }
+      });
+
+      Object.keys(anchors).forEach(root => {
+        const anchorWords = anchors[root];
+        const anchorPhrases = anchorWords.map(a => termPhrase[a]).filter(Boolean);
+        if (anchorPhrases.length === 0) {
+          return;
+        }
+        Object.keys(wordCoverage)
+          .filter(w => !anchorWords.includes(w))
+          .filter(w => w.indexOf(root) === 0 || anchorWords.some(a => a.length >= 4 && w.indexOf(a) >= 0))
+          .filter(w => !checkTerm(w).reason)
+          .forEach(m => useTerm(m, 1, `family ${root}*`, anchorPhrases));
+      });
+    }
+  }
+
+  plan.rejected = Object.keys(rejected).map(k => rejected[k]).filter(r => !candidates[r.phrase]).sort((a, b) => b.coverage - a.coverage);
+
+  // Greedy set cover: most replaced negatives first, on a tie the more
+  // specific phrase. Every candidate has its own minimum (families: 1).
+  const pool = Object.keys(candidates).map(k => candidates[k]);
   const open = {};
   words.forEach((_, i) => { open[i] = true; });
   const selected = [];
+  const selectedPhrases = {};
 
   while (true) {
     let best = null;
     let bestCount = 0;
 
-    for (const c of candidates) {
+    for (const c of pool) {
       let count = 0;
       for (const i of c.idx) {
         if (open[i]) {
           count++;
         }
+      }
+      if (count < c.min || count === 0) {
+        continue;
+      }
+      // family members only follow once their anchor ("boxen") was selected
+      if (c.requires && !c.requires.some(r => selectedPhrases[r])) {
+        continue;
       }
       if (count > bestCount || (count === bestCount && best && c.words > best.words)) {
         best = c;
@@ -450,7 +622,7 @@ function planConsolidation(negatives, options, guard) {
       }
     }
 
-    if (!best || bestCount < options.minCoverage) {
+    if (!best) {
       break;
     }
 
@@ -458,16 +630,18 @@ function planConsolidation(negatives, options, guard) {
     const alsoCovers = keptPhrases.filter(p => !p.coveredByNew && containsPhrase(p.text, best.phrase));
     alsoCovers.forEach(p => { p.coveredByNew = true; });
 
-    selected.push({ phrase: best.phrase, negative: formatNegative({ text: best.phrase, type: 'PHRASE' }), replaced: replaced, alsoCovers: alsoCovers });
-    candidates.splice(candidates.indexOf(best), 1);
+    selected.push({ phrase: best.phrase, negative: formatNegative({ text: best.phrase, type: 'PHRASE' }), basis: best.basis, replaced: replaced, alsoCovers: alsoCovers });
+    selectedPhrases[best.phrase] = true;
+    pool.splice(pool.indexOf(best), 1);
   }
 
   keptPhrases.forEach(p => { delete p.coveredByNew; });
 
   // Limits per run
   let removals = 0;
+  const removable = (options.removeConflicting ? plan.conflicting.map(n => Object.assign({}, n, { coveredBy: '' })) : []).concat(redundant);
 
-  redundant.forEach(n => {
+  removable.forEach(n => {
     if (removals < options.maxRemovals) {
       plan.redundant.push(n);
       removals++;
@@ -490,6 +664,34 @@ function planConsolidation(negatives, options, guard) {
 
   plan.after = plan.before - removals + plan.phrases.length;
   return plan;
+}
+
+// Returns a reason if the negative blocks what the rule declares relevant
+function findConflict(n, guard, protectedIndex) {
+  for (const re of guard.patterns) {
+    if (matchesPattern(re, n.text)) {
+      return 'matches positive pattern';
+    }
+  }
+
+  const w = n.text.split(' ');
+  let pool = null;
+  for (const x of w) {
+    const hits = protectedIndex.byWord[x] || [];
+    if (!pool || hits.length < pool.length) {
+      pool = hits;
+    }
+  }
+
+  for (const i of pool || []) {
+    const p = protectedIndex.items[i];
+    const blocks = n.type === 'EXACT' ? p.text === n.text : n.type === 'PHRASE' ? containsPhrase(p.text, n.text) : containsAllWords(p.text, n.text);
+    if (blocks) {
+      return `blocks ${p.reason} "${p.text}"`;
+    }
+  }
+
+  return '';
 }
 
 // Returns { reason, silent }. reason '' = candidate is safe.
@@ -531,6 +733,79 @@ function checkCandidate(gram, guard, protectedIndex) {
   }
 
   return { reason: '', silent: false };
+}
+
+// Extra checks for one-word negatives, which block the most traffic
+function checkSingleTerm(word, guard, protectedIndex, protectedWords, patternWords) {
+  if (word.length < 3 || /^\d+$/.test(word) || STOPWORD_SET[word]) {
+    return { reason: 'too short / stopword / number', silent: true };
+  }
+
+  if (protectedWords[word] || protectedWords[transliterate(word)]) {
+    return { reason: 'generic or protected word', silent: false };
+  }
+
+  if (patternWords.some(p => p.indexOf(word) >= 0 || p.indexOf(transliterate(word)) >= 0)) {
+    return { reason: 'part of the positive pattern', silent: false };
+  }
+
+  return checkCandidate(word, guard, protectedIndex);
+}
+
+// Longest word sequence around `word` that all negatives idx share
+function extendPhrase(word, idx, words, maxWords) {
+  const occ = idx.map(i => ({ w: words[i], p: words[i].indexOf(word) }));
+  const same = offset => {
+    const first = occ[0].w[occ[0].p + offset];
+    return first !== undefined && occ.every(o => o.w[o.p + offset] === first);
+  };
+  let left = 0;
+  let right = 0;
+
+  while (left + right + 1 < maxWords && same(-(left + 1))) {
+    left++;
+  }
+  while (left + right + 1 < maxWords && same(right + 1)) {
+    right++;
+  }
+
+  let phrase = occ[0].w.slice(occ[0].p - left, occ[0].p + right + 1);
+
+  // no filler words at the edges ("karate in" -> "karate")
+  while (phrase.length > 1 && STOPWORD_SET[phrase[0]] && phrase[0] !== word) {
+    phrase.shift();
+  }
+  while (phrase.length > 1 && STOPWORD_SET[phrase[phrase.length - 1]] && phrase[phrase.length - 1] !== word) {
+    phrase.pop();
+  }
+
+  return phrase.join(' ');
+}
+
+// Light stemming for word families: boxen -> box, karate -> karat
+function stemWord(word) {
+  const suffixes = ['ungen', 'ung', 'ern', 'en', 'er', 'ing', 'es', 'e', 'n', 's'];
+  for (const s of suffixes) {
+    if (word.length - s.length >= 3 && word.slice(-s.length) === s) {
+      return word.slice(0, -s.length);
+    }
+  }
+  return word;
+}
+
+// Literal words of the positive patterns ("kampf", "sport", "selbstverteidigung")
+function extractPatternWords(patterns) {
+  const out = [];
+  patterns.forEach(re => {
+    re.source
+      .replace(/\\[a-zA-Z]/g, ' ')
+      .replace(/\[[^\]]*\]|\{[^}]*\}/g, ' ')
+      .toLowerCase()
+      .split(/[^a-z0-9äöüßéèáàóòúùâêîôûç]+/)
+      .filter(w => w.length >= 4)
+      .forEach(w => out.push(w, transliterate(w)));
+  });
+  return out;
 }
 
 function buildWordIndex(items) {
@@ -607,6 +882,8 @@ function validateRules(rawRules) {
     r.campaignFilter = String(r.campaignFilter).trim();
     r.mode = String(r.consolidatorMode || r.mode).trim().toLowerCase() === 'test' ? 'test' : 'live';
     r.minCoverage = r.minCoverage === '' ? null : parseInt(r.minCoverage, 10);
+    r.singleMinCoverage = r.singleMinCoverage === '' ? null : parseInt(r.singleMinCoverage, 10);
+    r.protectedWords = String(r.protectedWords || '');
 
     if (!r.listName) {
       problems.push(`Rule ${r.id}: listName is missing.`);
@@ -627,6 +904,11 @@ function validateRules(rawRules) {
       return;
     }
 
+    if (r.singleMinCoverage !== null && (isNaN(r.singleMinCoverage) || r.singleMinCoverage < 2)) {
+      problems.push(`Rule ${r.id}: invalid singleMinCoverage (min. 2).`);
+      return;
+    }
+
     rules.push(r);
   });
 
@@ -643,7 +925,7 @@ function groupRulesByList(rules) {
     let g = byName[r.listName];
 
     if (!g) {
-      g = byName[r.listName] = { listName: r.listName, ruleIds: [], patterns: [], campaignFilters: [], useAttached: false, testMode: DRY_RUN, minCoverage: null };
+      g = byName[r.listName] = { listName: r.listName, ruleIds: [], patterns: [], campaignFilters: [], useAttached: false, testMode: DRY_RUN, minCoverage: null, singleMinCoverage: null, protectedWords: [] };
       groups.push(g);
     }
 
@@ -668,13 +950,31 @@ function groupRulesByList(rules) {
     if (r.minCoverage) {
       g.minCoverage = Math.max(g.minCoverage || 0, r.minCoverage);
     }
+
+    if (r.singleMinCoverage) {
+      g.singleMinCoverage = Math.max(g.singleMinCoverage || 0, r.singleMinCoverage);
+    }
+
+    if (r.protectedWords) {
+      g.protectedWords.push(r.protectedWords);
+    }
   });
 
   groups.forEach(g => {
     g.minCoverage = Math.max(g.minCoverage || MIN_COVERAGE, 2);
+    g.singleMinCoverage = Math.max(g.singleMinCoverage || SINGLE_TERM_MIN_COVERAGE, 2);
   });
 
   return groups;
+}
+
+function toWordSet(texts) {
+  const set = {};
+  texts.forEach(t => String(t || '').toLowerCase().split(/[\s,;]+/).filter(Boolean).forEach(w => {
+    set[w] = true;
+    set[transliterate(w)] = true;
+  }));
+  return set;
 }
 
 function toBool(value) {
@@ -756,10 +1056,13 @@ function buildLogRows(results, timestamp) {
     r.failed.filter(f => f.kind !== 'add').forEach(f => { failedTexts[f.text] = true; });
     const row = (action, negative, type, replaces, reason) => [timestamp, r.listName, failedTexts[negative] ? ACTION.failed : action, negative, type, replaces || '', reason || ''];
 
-    r.redundant.forEach(n => rows.push(row(removedAction, formatNegative(n), n.type, '', `${n.reason}: ${n.coveredBy}`)));
+    r.redundant.forEach(n => rows.push(row(removedAction, formatNegative(n), n.type, '', n.coveredBy ? `${n.reason}: ${n.coveredBy}` : n.reason)));
+    if (!REMOVE_CONFLICTING_NEGATIVES) {
+      r.conflicting.forEach(n => rows.push(row(ACTION.conflict, formatNegative(n), n.type, '', n.reason)));
+    }
 
     r.phrases.forEach(p => {
-      rows.push(row(done ? ACTION.added : ACTION.wouldAdd, p.negative, 'PHRASE', p.replaced.length + p.alsoCovers.length, ''));
+      rows.push(row(done ? ACTION.added : ACTION.wouldAdd, p.negative, 'PHRASE', p.replaced.length + p.alsoCovers.length, p.basis));
       p.replaced.concat(p.alsoCovers).forEach(n => rows.push(row(removedAction, formatNegative(n), n.type, '', `replaced by ${p.negative}`)));
     });
 
@@ -992,7 +1295,10 @@ const I18N = {
     tileErrors: 'Errors',
     intro: 'Every new "phrase" negative blocks all search terms of the [exact] negatives it replaces. Redundant negatives were already blocked by another negative of the same list. A CSV with all removed negatives is attached as backup.',
     listSub: (b, a, s) => `${b} → ${a} negatives (−${s})`,
-    colPhrase: 'New phrase negative', colCount: 'Replaces', colExamples: 'Examples',
+    colPhrase: 'New phrase negative', colCount: 'Replaces', colExamples: 'Examples', colBasis: 'Basis',
+    basis: b => b === 'phrase' ? 'shared phrase' : b === 'term' ? 'single term' : b.replace('family', 'word family'),
+    conflictTitle: (n, removed) => `${n} negative(s) contradicting the rule${removed ? ' (removed)' : ' - please check'}`,
+    colConflict: 'Negative', colConflictReason: 'Problem',
     colRedundant: 'Removed negative', colReason: 'Blocked by',
     colCandidate: 'Rejected candidate', colWhy: 'Reason',
     redundantTitle: n => `${n} redundant negative(s)`,
@@ -1023,7 +1329,10 @@ const I18N = {
     tileErrors: 'Fehler',
     intro: 'Jeder neue "Phrase"-Ausschluss blockiert alle Suchbegriffe der [Exact]-Ausschlüsse, die er ersetzt. Redundante Ausschlüsse waren bereits durch einen anderen Ausschluss derselben Liste blockiert. Eine CSV mit allen entfernten Ausschlüssen hängt als Backup an.',
     listSub: (b, a, s) => `${b} → ${a} Ausschlüsse (−${s})`,
-    colPhrase: 'Neuer Phrase-Ausschluss', colCount: 'Ersetzt', colExamples: 'Beispiele',
+    colPhrase: 'Neuer Phrase-Ausschluss', colCount: 'Ersetzt', colExamples: 'Beispiele', colBasis: 'Grundlage',
+    basis: b => b === 'phrase' ? 'gemeinsame Phrase' : b === 'term' ? 'Einzelbegriff' : b.replace('family', 'Wortfamilie'),
+    conflictTitle: (n, removed) => `${n} Ausschluss/Ausschlüsse im Widerspruch zur Regel${removed ? ' (entfernt)' : ' - bitte prüfen'}`,
+    colConflict: 'Ausschluss', colConflictReason: 'Problem',
     colRedundant: 'Entfernter Ausschluss', colReason: 'Blockiert durch',
     colCandidate: 'Abgelehnter Kandidat', colWhy: 'Grund',
     redundantTitle: n => `${n} redundante(r) Ausschluss/Ausschlüsse`,
@@ -1093,7 +1402,7 @@ function buildMailHtml(results, problems, context) {
   const allTest = results.length > 0 && results.every(r => r.testMode);
   const max = EMAIL_MAX_ROWS_PER_LIST;
 
-  if (saved + phraseCount + redundantCount + errorCount === 0 && !SEND_EMAIL_IF_NOTHING_CHANGED) {
+  if (saved + phraseCount + redundantCount + errorCount + sum(r => r.conflicting.length) === 0 && !SEND_EMAIL_IF_NOTHING_CHANGED) {
     return null;
   }
 
@@ -1139,23 +1448,31 @@ function buildMailHtml(results, problems, context) {
 
     if (r.phrases.length > 0) {
       body += mailTable(
-        [{ title: t.colPhrase }, { title: t.colCount, align: 'right' }, { title: t.colExamples }],
+        [{ title: t.colPhrase }, { title: t.colBasis }, { title: t.colCount, align: 'right' }, { title: t.colExamples }],
         r.phrases.slice(0, max).map(p => {
           const all = p.replaced.concat(p.alsoCovers);
-          return [p.negative, fmt(all.length), all.slice(0, 3).map(formatNegative).join(', ') + (all.length > 3 ? ', ...' : '')];
+          return [p.negative, t.basis(p.basis || 'phrase'), fmt(all.length), all.slice(0, 3).map(formatNegative).join(', ') + (all.length > 3 ? ', ...' : '')];
         }));
       if (r.phrases.length > max) {
         body += mailNote(t.more(r.phrases.length - max));
       }
     }
 
-    if (r.redundant.length > 0) {
-      body += mailSubheading(t.redundantTitle(fmt(r.redundant.length)));
+    if (r.conflicting.length > 0) {
+      body += mailSubheading(t.conflictTitle(fmt(r.conflicting.length), REMOVE_CONFLICTING_NEGATIVES));
+      body += mailTable(
+        [{ title: t.colConflict }, { title: t.colConflictReason }],
+        r.conflicting.slice(0, max).map(n => [formatNegative(n), n.reason]));
+    }
+
+    const redundantOnly = r.redundant.filter(n => n.coveredBy);
+    if (redundantOnly.length > 0) {
+      body += mailSubheading(t.redundantTitle(fmt(redundantOnly.length)));
       body += mailTable(
         [{ title: t.colRedundant }, { title: t.colReason }],
-        r.redundant.slice(0, max).map(n => [formatNegative(n), n.reason === 'duplicate' ? `${n.coveredBy} (duplicate)` : n.coveredBy]));
-      if (r.redundant.length > max) {
-        body += mailNote(t.more(r.redundant.length - max));
+        redundantOnly.slice(0, max).map(n => [formatNegative(n), n.reason === 'duplicate' ? `${n.coveredBy} (duplicate)` : n.coveredBy]));
+      if (redundantOnly.length > max) {
+        body += mailNote(t.more(redundantOnly.length - max));
       }
     }
 
@@ -1163,9 +1480,9 @@ function buildMailHtml(results, problems, context) {
       body += mailSubheading(t.rejectedTitle(fmt(r.rejected.length)));
       body += mailTable(
         [{ title: t.colCandidate }, { title: t.colCount, align: 'right' }, { title: t.colWhy }],
-        r.rejected.slice(0, 10).map(c => [`"${c.phrase}"`, fmt(c.coverage), c.reason]));
-      if (r.rejected.length > 10) {
-        body += mailNote(t.more(r.rejected.length - 10));
+        r.rejected.slice(0, 20).map(c => [`"${c.phrase}"`, fmt(c.coverage), c.reason]));
+      if (r.rejected.length > 20) {
+        body += mailNote(t.more(r.rejected.length - 20));
       }
     }
 
@@ -1256,5 +1573,5 @@ function mailLayout(o) {
 
 // Allows running the unit tests with Node.js (ignored by Google Ads)
 if (typeof module !== 'undefined') {
-  module.exports = { planConsolidation, containsPhrase, containsAllWords, parseRuleRows, validateRules, groupRulesByList, buildMailHtml, buildLogRows, main };
+  module.exports = { planConsolidation, toWordSet, stemWord, extendPhrase, containsPhrase, containsAllWords, parseRuleRows, validateRules, groupRulesByList, buildMailHtml, buildLogRows, main };
 }

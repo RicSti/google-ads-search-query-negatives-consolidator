@@ -130,15 +130,45 @@ assert.strictEqual(plan.after, 9 - 4 - 3 - 1 + 2);
 
 // Safety: pattern, protected terms, stopword edges
 plan = nc.planConsolidation([
-  E('shoe outlet a'), E('shoe outlet b'), E('shoe outlet c'),
+  E('cheap outlet a'), E('cheap outlet b'), E('cheap outlet c'),
   E('free movies x'), E('free movies y'), E('free movies z'),
   E('to the x'), E('to the y'), E('to the z')
-], opts, { patterns: [/shoe/i], protectedTerms: [{ text: 'watch free movies shoe', reason: 'relevant search term' }] });
+], opts, { patterns: [/outlet/i], protectedTerms: [{ text: 'watch free movies shoe', reason: 'relevant search term' }] });
 assert.strictEqual(plan.phrases.length, 0);
 assert.deepStrictEqual(plan.rejected.map(r => `${r.phrase}|${r.reason}`).sort(), [
-  'free movies|would block relevant search term "watch free movies shoe"',
-  'shoe outlet|matches positive pattern'
+  'free movies|would block relevant search term "watch free movies shoe"'
 ]);
+// Negatives matching the positive pattern are conflicts, not consolidated
+assert.deepStrictEqual(plan.conflicting.map(n => `${n.text}|${n.reason}`), [
+  'cheap outlet a|matches positive pattern', 'cheap outlet b|matches positive pattern', 'cheap outlet c|matches positive pattern'
+]);
+
+// Conflict: exact negative identical to an own keyword, phrase negative blocking a relevant term
+plan = nc.planConsolidation([E('take on do'), P('team'), E('karate')], Object.assign({}, opts, { removeConflicting: true }),
+  { patterns: [], protectedTerms: [{ text: 'take on do', reason: 'own keyword' }, { text: 'taekwondo team', reason: 'relevant search term' }] });
+assert.deepStrictEqual(plan.conflicting.map(n => n.reason), ['blocks own keyword "take on do"', 'blocks relevant search term "taekwondo team"']);
+assert.strictEqual(plan.redundant.length, 2); // removeConflicting = true
+assert.strictEqual(plan.after, 1);
+
+// Single terms, phrase extension and word families
+const single = Object.assign({}, opts, { minCoverage: 8, singleTerms: true, singleMinCoverage: 3, wordFamilies: true, minRootLength: 3, protectedWords: nc.toWordSet(['nähe kinder']) });
+plan = nc.planConsolidation([
+  E('karate landshut'), E('karate'), E('karate für kinder'), E('kinderkarate in der nähe'),
+  E('boxen landshut'), E('boxen in der nähe'), E('landshut boxen'), E('boxclub in meiner nähe'), E('kickboxtempel ingolstadt'),
+  E('kung fu landshut'), E('kung fu lernen'), E('kung fu für kinder'),
+  E('yoga in der nähe'), E('kinder in der nähe'), E('fitness in der nähe'), E('taekwondo team'),
+  E('turnen kinder'), E('kinderturnen'), E('bodenturnen')
+], single, { patterns: [/taekwondo|kampf\s*sport/i], protectedTerms: [{ text: 'taekwondo landshut', reason: 'own keyword' }] });
+const got = plan.phrases.map(p => `${p.negative}|${p.basis}|${p.replaced.length}`).sort();
+assert.deepStrictEqual(got, [
+  '"boxclub"|family box*|1', '"boxen"|term|3', '"karate"|term|3',
+  '"kinderkarate"|family karat*|1', '"kung fu"|term|3'
+], got.join('\n'));
+assert.ok(plan.rejected.some(r => r.phrase === 'landshut' && /own keyword/.test(r.reason)));
+assert.ok(plan.rejected.some(r => r.phrase === 'nähe' && /generic/.test(r.reason)));
+assert.deepStrictEqual(plan.conflicting.map(n => n.text), ['taekwondo team']);
+assert.strictEqual(nc.stemWord('boxen'), 'box');
+assert.strictEqual(nc.extendPhrase('kung', [0, 1], [['kung', 'fu', 'x'], ['a', 'kung', 'fu']], 5), 'kung fu');
 
 // Transliteration: pattern "maenner" protects "männer"
 plan = nc.planConsolidation([E('männer schuhe a'), E('männer schuhe b'), E('männer schuhe c')], opts, { patterns: [/maenner/i], protectedTerms: [] });

@@ -18,6 +18,8 @@ Built as companion of the [Search Query Excluder](https://github.com/RicSti/goog
   - exact / phrase negatives already blocked by a phrase negative (`[weather today]` ← `"weather"`)
   - exact / phrase / broad negatives already blocked by a broad negative (`[jobs in hamburg]` ← `hamburg jobs`)
 - **Step 2 – consolidate** exact negatives into phrase negatives of 2–5 words (greedy set cover: the phrase replacing the most negatives first). Existing phrase negatives covered by a new phrase are removed as well.
+- **Step 3 – single terms and word families**: an off-topic word that occurs in several negatives becomes **one one-word phrase negative**, and related word forms are excluded with it (details below).
+- **Conflict check**: negatives that match your positive pattern or block one of your own keywords / relevant search terms are reported (and optionally removed) – they cost relevant traffic.
 - **Safety nets** – a new phrase is rejected if it
   - matches your *positive pattern* (the regex of the Search Query Excluder)
   - is contained in one of your own keywords
@@ -29,6 +31,37 @@ Built as companion of the [Search Query Excluder](https://github.com/RicSti/goog
 - **Log tab** in the Google Sheet
 - **Shares the `rules` tab with the Search Query Excluder** – one sheet for both scripts
 - Changes are made phrase by phrase: an exact negative is only removed after the phrase replacing it was accepted by Google Ads
+
+## Single terms and word families
+
+Example from a Taekwon-Do school – 107 exact negatives created by the Search Query Excluder:
+
+```
+[karate landshut], [karate], [kinder karate münchen], … (17)   →  "karate"
+[kickboxen in der nähe], [kickboxen kinder], …          (6)   →  "kickboxen"
+[kung fu landshut], [kung fu lernen in der nähe], …     (3)   →  "kung fu"
+[boxen landshut], [landshut boxen], …                   (4)   →  "boxen"
+   word family box*:  [boxclub in meiner nähe]                →  "boxclub"
+                      [boxing für kinder in der nähe]         →  "boxing"
+                      [kinderboxen in der nähe]               →  "kinderboxen"
+```
+
+Result in the dry run: 107 → 61 negatives, and every future search containing *karate*, *boxclub*, … is blocked without a new negative.
+
+How it works:
+
+1. **Single terms** – every word occurring in at least `SINGLE_TERM_MIN_COVERAGE` (3) exact negatives is a candidate. If all its negatives share more words, the phrase is extended (`kung` → `"kung fu"`, `courage` → `"la courage"`).
+2. **Word families** – words with the same stem belong together: `boxen`, `boxing`, `boxclub` start with `box`, `kickboxen` and `kinderboxen` contain `boxen`. A family needs an *anchor* that qualifies as single term on its own (`boxen`, 4×). Once the anchor is excluded, every other member becomes a phrase negative too – even if it occurs only once. Google Ads has no substring negatives, so each word form needs its own negative.
+3. **Greedy selection** – the term covering the most negatives wins first. Words that only occur together with an already excluded term ("münchen" in `[karate für kinder münchen]`) drop below the threshold and are left alone.
+
+One-word negatives block the most traffic, so they have extra safety nets:
+
+- `GENERIC_WORDS` (built-in, German + English): words that also appear in relevant searches – *nähe, kinder, preise, kurs, training, probetraining, online, …* – never become one-word negatives.
+- `PROTECTED_WORDS` / rule column `protectedWords`: your own additions, typically **cities and districts of the target area** and your services.
+- Words that are part of the positive pattern (`sport` in `kam[pf]{1,3}[\s-]*sport`) are rejected.
+- The usual checks against own keywords and relevant / converting search terms (`landshut` is rejected because of the keyword `taekwondo landshut`).
+
+Check the table *New phrase negatives* in the dry run mail – column *Basis* shows whether a phrase is a shared phrase, a single term or a word family member. Switch off with `SINGLE_TERMS = false` or `WORD_FAMILIES = false`.
 
 ## Quick start
 
@@ -49,7 +82,9 @@ One rule per negative keyword list.
 | `listName` | Shared negative keyword list to consolidate | `SQE - AI Max negatives` |
 | `positivePattern` | Regular expression (case-insensitive) describing **relevant** searches. A new phrase matching it is never added. Optional, but strongly recommended. | `(shoe\|sneaker)s?` |
 | `campaignFilter` | Campaigns whose keywords and search terms are used for the safety check, `%` = wildcard. Empty = all campaigns the list is attached to. | `%AI Max%` |
-| `minCoverage` | Optional: min. number of exact negatives a new phrase must replace (default `MIN_COVERAGE` = 8) | `5` |
+| `minCoverage` | Optional: min. number of exact negatives a new multi-word phrase must replace (default `MIN_COVERAGE` = 8) | `5` |
+| `singleMinCoverage` | Optional: min. number of exact negatives for a single term (default `SINGLE_TERM_MIN_COVERAGE` = 3) | `4` |
+| `protectedWords` | Optional: words that must never become one-word negatives (comma or space separated) | `landshut, ergolding, kinder` |
 | `mode` | `live` or `test` | `live` |
 | `active` | `false` = ignore rule | `true` |
 
@@ -69,11 +104,11 @@ const RULES = [
 
 1. Put the URL of a Google Sheet into `SPREADSHEET_URL` – this can be the **same sheet as for the Search Query Excluder**.
 2. The script reads the tab `rules` (created on the first run if missing). Columns are found by their header names, the order does not matter:
-   `active | campaignFilter | listName | positivePattern | … | consolidate | consolidatorMode | minCoverage`
+   `active | campaignFilter | listName | positivePattern | … | consolidate | consolidatorMode | minCoverage | singleMinCoverage | protectedWords`
 3. Optional consolidator-only columns:
    - `consolidate` – `false` = this row is ignored by the consolidator (but still used by the Excluder)
    - `consolidatorMode` – `live` / `test` for the consolidator only (otherwise `mode` is used)
-   - `minCoverage` – see above
+   - `minCoverage`, `singleMinCoverage`, `protectedWords` – see above
 4. Every run appends to the tab `consolidator_log`.
 
 ## Settings reference
@@ -90,6 +125,13 @@ const RULES = [
 | `MIN_COVERAGE` | `8` | Min. exact negatives one new phrase must replace |
 | `MIN_WORDS` / `MAX_WORDS` | `2` / `5` | Length of new phrase negatives in words |
 | `REMOVE_REDUNDANT_NEGATIVES` | `true` | Step 1 (duplicates / already covered negatives) |
+| `SINGLE_TERMS` | `true` | One-word phrase negatives for frequent off-topic terms |
+| `SINGLE_TERM_MIN_COVERAGE` | `3` | Min. exact negatives containing the term |
+| `WORD_FAMILIES` | `true` | Exclude related word forms together (boxen, kickboxen, boxclub) |
+| `MIN_ROOT_LENGTH` | `3` | Min. length of a word stem |
+| `GENERIC_WORDS` | de + en | Never one-word negatives |
+| `PROTECTED_WORDS` | `''` | Own additions to `GENERIC_WORDS` (cities, services, …) |
+| `REMOVE_CONFLICTING_NEGATIVES` | `false` | Also remove negatives that contradict the rule (always reported) |
 | `STOPWORDS` | en + de | Filler words, see above |
 | `SKIP_STOPWORD_EDGES` | `true` | Phrases must not start or end with a filler word |
 | `CHECK_SEARCH_TERMS` | `true` | Check new phrases against relevant / converting search terms |

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 – 2026-11-17
+
+- Single terms: an off-topic word occurring in several exact negatives becomes one one-word phrase negative (`"karate"`); extended to the longest shared phrase where possible (`"kung fu"`)
+- Word families: related word forms are excluded together once the family's anchor is excluded (`"boxen"` → `"boxclub"`, `"boxing"`, `"kinderboxen"`)
+- Safety nets for single terms: built-in generic word list (de/en), `PROTECTED_WORDS` / rule column `protectedWords`, words of the positive pattern
+- Rule column `singleMinCoverage`
+- Conflict check: negatives matching the positive pattern or blocking own keywords / relevant search terms are reported (optional removal with `REMOVE_CONFLICTING_NEGATIVES`)
+- E-mail: column *Basis* (shared phrase / single term / word family), conflict table
+
 ## 1.0.0 – 2026-11-17
 
 First public release as a single-account script (based on an internal MCC version).
