@@ -71,7 +71,7 @@ Check the table *New phrase negatives* in the dry run mail – column *Basis* sh
    - `RULES` (or `SPREADSHEET_URL`, see below)
    - `NOTIFY_EMAILS`
 4. Click **Authorize**, then **Preview**. `DRY_RUN = true` is the default, so nothing is changed.
-5. Check the log and the e-mail – especially the new phrase negatives. If the result is plausible, set `DRY_RUN = false` and schedule the script (weekly is a good start; when combined with the Search Query Excluder run the consolidator after it).
+5. Check the log and the e-mail – especially the new phrase negatives. If the result is plausible, set `DRY_RUN = false` and schedule the script (weekly is a good start). The order relative to the Search Query Excluder doesn't matter, see *Good to know*.
 
 ## Rules
 
@@ -149,6 +149,7 @@ const RULES = [
 - The safety check only knows search terms Google reports and your keywords – a relevant search that never occurred cannot be protected. A good `positivePattern` is the best protection.
 - Undo: the backup CSV lists every removed negative. Re-add them via Google Ads Editor (or the list's UI) and remove the phrase negative.
 - Without `campaignFilter` the safety check uses the campaigns the list is attached to. Google Ads Scripts only return Search / Display campaigns there – for other campaign types set a `campaignFilter`.
+- **Together with the Search Query Excluder** (v1.1.0 or newer): the Excluder checks every search term against the current content of the list – including phrase and broad negatives – before adding it. Terms covered by a consolidated phrase (`karate landshut` ← `"karate"`) are therefore not re-added, even though they still appear in the search terms report. No log or sheet is involved, so manual changes to the list are respected as well. Older Excluder versions re-add such terms as exact negatives – please update.
 - The script runs in a single account. For manager accounts (MCC) run it in each client account.
 
 ## Development
